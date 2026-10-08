@@ -2,16 +2,14 @@ name: Build Velora APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -19,128 +17,110 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # ==========================================
-      # نصب دستی SDK و NDK (بدون وابستگی به اکشن‌های شخص ثالث)
-      # ==========================================
-      - name: Install Android SDK & NDK Manually
+      - name: Setup Android SDK + NDK
         run: |
-          # 1. تنظیم متغیرهای محیطی
-          export ANDROID_SDK_ROOT="$HOME/android-sdk"
-          export ANDROID_HOME="$ANDROID_SDK_ROOT"
-          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-
-          # 2. دانلود و استخراج Command-line Tools
-          echo "⬇️ Downloading Android Command-line Tools..."
-          curl -fsSL -o /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extracted
-          mv /tmp/cmdline-tools-extracted/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-
-          # 3. پذیرش لایسنس‌ها
-          echo "📜 Accepting licenses..."
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
-
-          # 4. نصب پلتفرم و Build-Tools مورد نیاز
-          echo "📦 Installing platform and build-tools..."
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-33" "build-tools;33.0.2" > /dev/null 2>&1
-
-          # 5. نصب NDK نسخه 25.2.9519653
-          echo "🔧 Installing NDK 25.2.9519653..."
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;25.2.9519653" > /dev/null 2>&1
-
-          # 6. ذخیره متغیرهای محیطی برای مراحل بعدی
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-
-      - name: Verify Android Setup
-        run: |
-          echo "ANDROID_HOME = $ANDROID_HOME"
-          echo "ANDROID_NDK_HOME = $ANDROID_NDK_HOME"
-          which sdkmanager
-          sdkmanager --version
-          ls -la "$ANDROID_NDK_HOME" | head -5
+          export ANDROID_HOME=$HOME/android-sdk
+          mkdir -p $ANDROID_HOME/cmdline-tools
+          cd $ANDROID_HOME/cmdline-tools
+          curl -sL -o tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q tools.zip
+          mv cmdline-tools latest
+          rm tools.zip
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-33" "build-tools;33.0.2" "ndk;25.2.9519653" 2>&1 | tail -3
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
 
-      # ==========================================
-      # لایه ۱: تلاش با cargo-apk نسخه پایدار 0.9.6
-      # ==========================================
-      - name: Install cargo-apk (v0.9.6)
-        id: install-cargo-apk
-        run: cargo install cargo-apk --version 0.9.6 --locked
-        continue-on-error: true
+      - name: Build .so with cargo-ndk
+        run: cargo ndk -t arm64-v8a -o jniLibs build --release
 
-      - name: Build with cargo-apk
-        id: build-cargo-apk
-        if: steps.install-cargo-apk.outcome == 'success'
-        run: cargo apk build --release
-        continue-on-error: true
-
-      # ==========================================
-      # لایه ۲: Fallback به xbuild (جانشین رسمی cargo-apk)
-      # ==========================================
-      - name: Fallback - Install and Build with xbuild
-        id: build-xbuild
-        if: steps.build-cargo-apk.outcome == 'failure' || steps.install-cargo-apk.outcome == 'failure'
+      - name: Build APK manually
         run: |
-          echo "⚠️ cargo-apk failed. Trying xbuild as fallback..."
-          cargo install xbuild
-          xbuild build --release --platform android
-        continue-on-error: true
+          set -e
+          BT=$ANDROID_HOME/build-tools/33.0.2
+          AJAR=$ANDROID_HOME/platforms/android-33/android.jar
 
-      # ==========================================
-      # لایه ۳: Fallback نهایی به cargo-ndk
-      # ==========================================
-      - name: Fallback - Install and Build with cargo-ndk
-        id: build-cargo-ndk
-        if: steps.build-xbuild.outcome == 'failure'
-        run: |
-          echo "⚠️ xbuild failed. Trying cargo-ndk as final fallback..."
-          cargo install cargo-ndk
-          cargo ndk -t aarch64-linux-android -o ./jniLibs build --release
-        continue-on-error: true
+          # ساختار APK
+          mkdir -p build-apk/res/values
+          mkdir -p build-apk/lib/arm64-v8a
+          cp jniLibs/arm64-v8a/libvelora.so build-apk/lib/arm64-v8a/
 
-      # ==========================================
-      # نمایش خروجی‌ها و آپلود
-      # ==========================================
-      - name: Debug - Find all build outputs
-        if: always()
-        run: |
-          echo "=== All .apk files ==="
-          find / -name "*.apk" -type f 2>/dev/null || echo "NO APK FOUND"
-          echo ""
-          echo "=== All .so files ==="
-          find target -name "*.so" -type f 2>/dev/null || echo "NO .so FOUND"
-          echo ""
-          echo "=== Build results ==="
-          echo "cargo-apk: ${{ steps.build-cargo-apk.outcome }}"
-          echo "xbuild: ${{ steps.build-xbuild.outcome }}"
-          echo "cargo-ndk: ${{ steps.build-cargo-ndk.outcome }}"
+          # strings.xml
+          cat > build-apk/res/values/strings.xml << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Velora</string>
+          </resources>
+          XMLEOF
+
+          # AndroidManifest.xml
+          cat > build-apk/AndroidManifest.xml << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.velora.player">
+              <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33"/>
+              <application android:label="@string/app_name" android:hasCode="false">
+                  <activity
+                      android:name="android.app.NativeActivity"
+                      android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode"
+                      android:exported="true"
+                      android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+                      <meta-data
+                          android:name="android.app.lib_name"
+                          android:value="velora"/>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          XMLEOF
+
+          # کامپایل و لینک
+          cd build-apk
+          $BT/aapt2 compile --dir res -o res.zip
+          $BT/aapt2 link -o base.apk -I $AJAR --manifest AndroidManifest.xml res.zip
+
+          # اضافه کردن .so به APK
+          zip -r base.apk lib
+
+          cd ..
+
+          # ساخت keystore
+          keytool -genkeypair -keystore debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US" -noprompt 2>&1 | tail -1
+
+          # Align + Sign
+          $BT/zipalign -f 4 build-apk/base.apk build-apk/aligned.apk
+          $BT/apksigner sign \
+            --ks debug.keystore \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --out velora.apk \
+            build-apk/aligned.apk
+
+          $BT/apksigner verify --verbose velora.apk
+          echo "---"
+          ls -la velora.apk
 
       - name: Upload APK
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: velora-output
-          path: |
-            target/**/*.apk
-            target/**/*.so
-            jniLibs/**/*.so
-          if-no-files-found: warn
+          name: velora-apk
+          path: velora.apk
+          if-no-files-found: error
