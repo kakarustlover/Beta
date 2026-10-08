@@ -30,6 +30,7 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# ===== تنظیمات Android (سازگار با cargo-apk 0.9.6 و 2.0+) =====
 [package.metadata.android]
 package = "com.velora.player"
 apk_name = "velora"
@@ -42,3 +43,8 @@ target_sdk_version = 33
 [package.metadata.android.application]
 label = "Velora"
 theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+
+# ===== Fallback برای cargo-apk 2.0+ (فرمت جدید) =====
+[package.metadata.android.build]
+targets = ["aarch64-linux-android"]
+apk_name = "velora"
