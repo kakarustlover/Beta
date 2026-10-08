@@ -10,15 +10,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ==========================================
-      # مرحله ۱: دریافت کد
-      # ==========================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ==========================================
-      # مرحله ۲: نصب Java 17
-      # ==========================================
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -26,45 +20,54 @@ jobs:
           java-version: '17'
 
       # ==========================================
-      # مرحله ۳: نصب Android SDK
+      # نصب دستی SDK و NDK (بدون وابستگی به اکشن‌های شخص ثالث)
       # ==========================================
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      # ==========================================
-      # مرحله ۴: نصب NDK (با Fallback)
-      # ==========================================
-      - name: Install NDK 25.2.9519653
+      - name: Install Android SDK & NDK Manually
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "ndk;25.2.9519653" || {
-            echo "⚠️ NDK 25.2.9519653 failed, trying 25.2.9519653 with different approach..."
-            sdkmanager --install "ndk;25.2.9519653"
-          }
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          # 1. تنظیم متغیرهای محیطی
+          export ANDROID_SDK_ROOT="$HOME/android-sdk"
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
 
-      # ==========================================
-      # مرحله ۵: بررسی NDK
-      # ==========================================
-      - name: Verify NDK
+          # 2. دانلود و استخراج Command-line Tools
+          echo "⬇️ Downloading Android Command-line Tools..."
+          curl -fsSL -o /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extracted
+          mv /tmp/cmdline-tools-extracted/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+
+          # 3. پذیرش لایسنس‌ها
+          echo "📜 Accepting licenses..."
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+          # 4. نصب پلتفرم و Build-Tools مورد نیاز
+          echo "📦 Installing platform and build-tools..."
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-33" "build-tools;33.0.2" > /dev/null 2>&1
+
+          # 5. نصب NDK نسخه 25.2.9519653
+          echo "🔧 Installing NDK 25.2.9519653..."
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;25.2.9519653" > /dev/null 2>&1
+
+          # 6. ذخیره متغیرهای محیطی برای مراحل بعدی
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+
+      - name: Verify Android Setup
         run: |
+          echo "ANDROID_HOME = $ANDROID_HOME"
           echo "ANDROID_NDK_HOME = $ANDROID_NDK_HOME"
-          echo "NDK_HOME = $NDK_HOME"
-          ls -la "$ANDROID_NDK_HOME" | head -10 || echo "⚠️ NDK directory not found"
+          which sdkmanager
+          sdkmanager --version
+          ls -la "$ANDROID_NDK_HOME" | head -5
 
-      # ==========================================
-      # مرحله ۶: نصب Rust و target اندروید
-      # ==========================================
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      # ==========================================
-      # مرحله ۷: کش Cargo
-      # ==========================================
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -77,43 +80,29 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # ==========================================
-      # لایه ۱: نصب cargo-apk نسخه 0.9.6 (پایدار)
+      # لایه ۱: تلاش با cargo-apk نسخه پایدار 0.9.6
       # ==========================================
-      - name: Install cargo-apk (v0.9.6 - Stable)
+      - name: Install cargo-apk (v0.9.6)
         id: install-cargo-apk
-        run: |
-          cargo install cargo-apk --version 0.9.6 --locked || {
-            echo "⚠️ cargo-apk 0.9.6 failed, trying latest..."
-            cargo install cargo-apk || exit 1
-          }
+        run: cargo install cargo-apk --version 0.9.6 --locked
         continue-on-error: true
 
-      # ==========================================
-      # بیلد با cargo-apk
-      # ==========================================
-      - name: Build APK with cargo-apk
+      - name: Build with cargo-apk
         id: build-cargo-apk
         if: steps.install-cargo-apk.outcome == 'success'
-        run: |
-          cargo apk build --release || {
-            echo "⚠️ cargo-apk build failed, will try fallback..."
-            exit 1
-          }
+        run: cargo apk build --release
         continue-on-error: true
 
       # ==========================================
-      # لایه ۲: Fallback به xbuild
+      # لایه ۲: Fallback به xbuild (جانشین رسمی cargo-apk)
       # ==========================================
       - name: Fallback - Install and Build with xbuild
         id: build-xbuild
         if: steps.build-cargo-apk.outcome == 'failure' || steps.install-cargo-apk.outcome == 'failure'
         run: |
           echo "⚠️ cargo-apk failed. Trying xbuild as fallback..."
-          cargo install xbuild || exit 1
-          xbuild build --release --platform android || {
-            echo "⚠️ xbuild failed, will try cargo-ndk..."
-            exit 1
-          }
+          cargo install xbuild
+          xbuild build --release --platform android
         continue-on-error: true
 
       # ==========================================
@@ -124,39 +113,27 @@ jobs:
         if: steps.build-xbuild.outcome == 'failure'
         run: |
           echo "⚠️ xbuild failed. Trying cargo-ndk as final fallback..."
-          cargo install cargo-ndk || exit 1
-          cargo ndk -t aarch64-linux-android build --release || {
-            echo "❌ All build methods failed!"
-            exit 1
-          }
+          cargo install cargo-ndk
+          cargo ndk -t aarch64-linux-android -o ./jniLibs build --release
         continue-on-error: true
 
       # ==========================================
-      # Debug: نمایش تمام خروجی‌های بیلد
+      # نمایش خروجی‌ها و آپلود
       # ==========================================
       - name: Debug - Find all build outputs
         if: always()
         run: |
           echo "=== All .apk files ==="
-          find / -name "*.apk" -type f 2>/dev/null || echo "NO APK FOUND ANYWHERE"
+          find / -name "*.apk" -type f 2>/dev/null || echo "NO APK FOUND"
           echo ""
           echo "=== All .so files ==="
           find target -name "*.so" -type f 2>/dev/null || echo "NO .so FOUND"
           echo ""
-          echo "=== target tree ==="
-          find target -maxdepth 4 -type d 2>/dev/null | head -40
-          echo ""
-          echo "=== ANDROID_NDK_HOME ==="
-          echo "$ANDROID_NDK_HOME"
-          echo ""
-          echo "=== cargo-apk build result ==="
+          echo "=== Build results ==="
           echo "cargo-apk: ${{ steps.build-cargo-apk.outcome }}"
           echo "xbuild: ${{ steps.build-xbuild.outcome }}"
           echo "cargo-ndk: ${{ steps.build-cargo-ndk.outcome }}"
 
-      # ==========================================
-      # آپلود همه خروجی‌ها (APK + .so)
-      # ==========================================
       - name: Upload APK
         if: always()
         uses: actions/upload-artifact@v4
@@ -165,4 +142,5 @@ jobs:
           path: |
             target/**/*.apk
             target/**/*.so
+            jniLibs/**/*.so
           if-no-files-found: warn
