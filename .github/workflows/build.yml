@@ -10,9 +10,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ==========================================
+      # مرحله ۱: دریافت کد
+      # ==========================================
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ==========================================
+      # مرحله ۲: نصب Java 17
+      # ==========================================
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -20,82 +26,45 @@ jobs:
           java-version: '17'
 
       # ==========================================
-      # لایه ۱: نصب SDK و NDK با استفاده از اکشن رسمی
+      # مرحله ۳: نصب Android SDK
       # ==========================================
-      - name: Setup Android SDK (Primary)
-        id: setup-android-primary
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        continue-on-error: true
-        with:
-          accept-android-sdk-licenses: yes  # پذیرش خودکار لایسنس‌ها
 
       # ==========================================
-      # لایه ۲: Fallback - نصب دستی SDK و NDK در صورت شکست لایه ۱
+      # مرحله ۴: نصب NDK (با Fallback)
       # ==========================================
-      - name: Fallback - Manual SDK & NDK Install
-        if: steps.setup-android-primary.outcome == 'failure'
+      - name: Install NDK 25.2.9519653
         run: |
-          echo "⚠️ Primary setup failed. Switching to manual SDK setup..."
-
-          # اطمینان از وجود متغیرهای محیطی
-          export ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}
-          export ANDROID_SDK_ROOT=$ANDROID_HOME
-
-          # پیدا کردن مسیر sdkmanager
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER="$ANDROID_HOME/tools/bin/sdkmanager"
-          fi
-
-          # نصب NDK نسخه 25.2.9519653
-          NDK_VERSION="25.2.9519653"
-          echo "Installing NDK $NDK_VERSION..."
-          yes | $SDKMANAGER --licenses > /dev/null 2>&1 || true
-          $SDKMANAGER "ndk;$NDK_VERSION" || true
-
-          # تنظیم متغیرهای محیطی
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+          yes | sdkmanager --licenses || true
+          sdkmanager "ndk;25.2.9519653" || {
+            echo "⚠️ NDK 25.2.9519653 failed, trying 25.2.9519653 with different approach..."
+            sdkmanager --install "ndk;25.2.9519653"
+          }
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
 
       # ==========================================
-      # لایه ۳: Fallback نهایی - نصب از طریق apt یا مسیر پیش‌فرض
-      # ==========================================
-      - name: Fallback - Last Resort NDK Path
-        if: steps.setup-android-primary.outcome == 'failure'
-        run: |
-          echo "🔍 Searching for existing NDK installations..."
-          find /usr/local/lib/android/sdk/ndk -maxdepth 1 -type d 2>/dev/null || true
-
-          # اگر NDK از قبل نصب شده بود، ازش استفاده کن
-          EXISTING_NDK=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -type d -name "25.*" 2>/dev/null | head -1)
-          if [ -n "$EXISTING_NDK" ]; then
-            echo "✅ Found existing NDK: $EXISTING_NDK"
-            echo "ANDROID_NDK_HOME=$EXISTING_NDK" >> $GITHUB_ENV
-            echo "NDK_HOME=$EXISTING_NDK" >> $GITHUB_ENV
-          fi
-
-      # ==========================================
-      # بررسی نهایی وجود NDK
+      # مرحله ۵: بررسی NDK
       # ==========================================
       - name: Verify NDK
         run: |
-          echo "ANDROID_NDK_HOME = ${{ env.ANDROID_NDK_HOME }}"
-          echo "NDK_HOME = ${{ env.NDK_HOME }}"
-          if [ -z "${{ env.ANDROID_NDK_HOME }}" ]; then
-            echo "❌ NDK not found!"
-            exit 1
-          fi
-          ls -la "${{ env.ANDROID_NDK_HOME }}" || echo "Warning: NDK directory not accessible"
+          echo "ANDROID_NDK_HOME = $ANDROID_NDK_HOME"
+          echo "NDK_HOME = $NDK_HOME"
+          ls -la "$ANDROID_NDK_HOME" | head -10 || echo "⚠️ NDK directory not found"
 
       # ==========================================
-      # نصب Rust و target اندروید
+      # مرحله ۶: نصب Rust و target اندروید
       # ==========================================
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
+      # ==========================================
+      # مرحله ۷: کش Cargo
+      # ==========================================
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -108,53 +77,92 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # ==========================================
-      # نصب cargo-apk (با Fallback به xbuild)
+      # لایه ۱: نصب cargo-apk نسخه 0.9.6 (پایدار)
       # ==========================================
-      - name: Install cargo-apk
+      - name: Install cargo-apk (v0.9.6 - Stable)
         id: install-cargo-apk
         run: |
-          cargo install cargo-apk --locked || {
-            echo "⚠️ cargo-apk install failed, trying without --locked..."
-            cargo install cargo-apk
-          } || {
-            echo "❌ cargo-apk failed entirely, will try xbuild..."
+          cargo install cargo-apk --version 0.9.6 --locked || {
+            echo "⚠️ cargo-apk 0.9.6 failed, trying latest..."
+            cargo install cargo-apk || exit 1
+          }
+        continue-on-error: true
+
+      # ==========================================
+      # بیلد با cargo-apk
+      # ==========================================
+      - name: Build APK with cargo-apk
+        id: build-cargo-apk
+        if: steps.install-cargo-apk.outcome == 'success'
+        run: |
+          cargo apk build --release || {
+            echo "⚠️ cargo-apk build failed, will try fallback..."
             exit 1
           }
         continue-on-error: true
 
       # ==========================================
-      # بیلد APK با cargo-apk
-      # ==========================================
-      - name: Build APK with cargo-apk
-        id: build-cargo-apk
-        if: steps.install-cargo-apk.outcome == 'success'
-        run: cargo apk build --release
-        continue-on-error: true
-
-      # ==========================================
-      # Fallback: اگر cargo-apk کار نکرد، از xbuild استفاده کن
+      # لایه ۲: Fallback به xbuild
       # ==========================================
       - name: Fallback - Install and Build with xbuild
+        id: build-xbuild
         if: steps.build-cargo-apk.outcome == 'failure' || steps.install-cargo-apk.outcome == 'failure'
         run: |
           echo "⚠️ cargo-apk failed. Trying xbuild as fallback..."
-          cargo install xbuild
+          cargo install xbuild || exit 1
           xbuild build --release --platform android || {
-            echo "❌ xbuild also failed. Manual build attempt..."
-            # تلاش دستی با cargo-ndk
-            cargo install cargo-ndk
-            cargo ndk -t aarch64-linux-android build --release
+            echo "⚠️ xbuild failed, will try cargo-ndk..."
+            exit 1
           }
+        continue-on-error: true
 
       # ==========================================
-      # آپلود APK (همه مسیرهای ممکن)
+      # لایه ۳: Fallback نهایی به cargo-ndk
+      # ==========================================
+      - name: Fallback - Install and Build with cargo-ndk
+        id: build-cargo-ndk
+        if: steps.build-xbuild.outcome == 'failure'
+        run: |
+          echo "⚠️ xbuild failed. Trying cargo-ndk as final fallback..."
+          cargo install cargo-ndk || exit 1
+          cargo ndk -t aarch64-linux-android build --release || {
+            echo "❌ All build methods failed!"
+            exit 1
+          }
+        continue-on-error: true
+
+      # ==========================================
+      # Debug: نمایش تمام خروجی‌های بیلد
+      # ==========================================
+      - name: Debug - Find all build outputs
+        if: always()
+        run: |
+          echo "=== All .apk files ==="
+          find / -name "*.apk" -type f 2>/dev/null || echo "NO APK FOUND ANYWHERE"
+          echo ""
+          echo "=== All .so files ==="
+          find target -name "*.so" -type f 2>/dev/null || echo "NO .so FOUND"
+          echo ""
+          echo "=== target tree ==="
+          find target -maxdepth 4 -type d 2>/dev/null | head -40
+          echo ""
+          echo "=== ANDROID_NDK_HOME ==="
+          echo "$ANDROID_NDK_HOME"
+          echo ""
+          echo "=== cargo-apk build result ==="
+          echo "cargo-apk: ${{ steps.build-cargo-apk.outcome }}"
+          echo "xbuild: ${{ steps.build-xbuild.outcome }}"
+          echo "cargo-ndk: ${{ steps.build-cargo-ndk.outcome }}"
+
+      # ==========================================
+      # آپلود همه خروجی‌ها (APK + .so)
       # ==========================================
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: velora-apk
+          name: velora-output
           path: |
-            target/release/apk/*.apk
-            target/aarch64-linux-android/release/apk/*.apk
-            target/aarch64-linux-android/release/*.apk
+            target/**/*.apk
+            target/**/*.so
           if-no-files-found: warn
