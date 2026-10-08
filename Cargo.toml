@@ -1,0 +1,45 @@
+[package]
+name = "velora"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/main.rs"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+audio = ["rodio"]   # real sound (synth pad). Build with: cargo apk build --release --features audio
+
+[dependencies]
+winit = { version = "0.30", default-features = false, features = ["android-native-activity", "rwh_06"] }
+wgpu = "=22.1.0"
+bytemuck = { version = "1", features = ["derive"] }
+fontdue = "0.9"
+pollster = "0.3"
+log = "0.4"
+rodio = { version = "0.19", default-features = false, optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[package.metadata.android]
+package = "com.velora.player"
+apk_name = "velora"
+build_targets = ["aarch64-linux-android"]
+resources = "res"
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 33
+
+[package.metadata.android.application]
+label = "Velora"
+icon = "@mipmap/ic_launcher"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
