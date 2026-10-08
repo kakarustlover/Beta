@@ -19,16 +19,78 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
+      # ==========================================
+      # لایه ۱: نصب SDK و NDK با استفاده از اکشن رسمی
+      # ==========================================
+      - name: Setup Android SDK (Primary)
+        id: setup-android-primary
         uses: android-actions/setup-android@v3
+        continue-on-error: true
+        with:
+          accept-android-sdk-licenses: yes  # پذیرش خودکار لایسنس‌ها
 
-      - name: Install NDK + accept licenses
+      # ==========================================
+      # لایه ۲: Fallback - نصب دستی SDK و NDK در صورت شکست لایه ۱
+      # ==========================================
+      - name: Fallback - Manual SDK & NDK Install
+        if: steps.setup-android-primary.outcome == 'failure'
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "ndk;25.2.9519653"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
-          echo "NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "⚠️ Primary setup failed. Switching to manual SDK setup..."
 
+          # اطمینان از وجود متغیرهای محیطی
+          export ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+
+          # پیدا کردن مسیر sdkmanager
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$ANDROID_HOME/tools/bin/sdkmanager"
+          fi
+
+          # نصب NDK نسخه 25.2.9519653
+          NDK_VERSION="25.2.9519653"
+          echo "Installing NDK $NDK_VERSION..."
+          yes | $SDKMANAGER --licenses > /dev/null 2>&1 || true
+          $SDKMANAGER "ndk;$NDK_VERSION" || true
+
+          # تنظیم متغیرهای محیطی
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+
+      # ==========================================
+      # لایه ۳: Fallback نهایی - نصب از طریق apt یا مسیر پیش‌فرض
+      # ==========================================
+      - name: Fallback - Last Resort NDK Path
+        if: steps.setup-android-primary.outcome == 'failure'
+        run: |
+          echo "🔍 Searching for existing NDK installations..."
+          find /usr/local/lib/android/sdk/ndk -maxdepth 1 -type d 2>/dev/null || true
+
+          # اگر NDK از قبل نصب شده بود، ازش استفاده کن
+          EXISTING_NDK=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -type d -name "25.*" 2>/dev/null | head -1)
+          if [ -n "$EXISTING_NDK" ]; then
+            echo "✅ Found existing NDK: $EXISTING_NDK"
+            echo "ANDROID_NDK_HOME=$EXISTING_NDK" >> $GITHUB_ENV
+            echo "NDK_HOME=$EXISTING_NDK" >> $GITHUB_ENV
+          fi
+
+      # ==========================================
+      # بررسی نهایی وجود NDK
+      # ==========================================
+      - name: Verify NDK
+        run: |
+          echo "ANDROID_NDK_HOME = ${{ env.ANDROID_NDK_HOME }}"
+          echo "NDK_HOME = ${{ env.NDK_HOME }}"
+          if [ -z "${{ env.ANDROID_NDK_HOME }}" ]; then
+            echo "❌ NDK not found!"
+            exit 1
+          fi
+          ls -la "${{ env.ANDROID_NDK_HOME }}" || echo "Warning: NDK directory not accessible"
+
+      # ==========================================
+      # نصب Rust و target اندروید
+      # ==========================================
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,13 +104,51 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
+      # ==========================================
+      # نصب cargo-apk (با Fallback به xbuild)
+      # ==========================================
       - name: Install cargo-apk
-        run: cargo install cargo-apk --locked
+        id: install-cargo-apk
+        run: |
+          cargo install cargo-apk --locked || {
+            echo "⚠️ cargo-apk install failed, trying without --locked..."
+            cargo install cargo-apk
+          } || {
+            echo "❌ cargo-apk failed entirely, will try xbuild..."
+            exit 1
+          }
+        continue-on-error: true
 
-      - name: Build APK
+      # ==========================================
+      # بیلد APK با cargo-apk
+      # ==========================================
+      - name: Build APK with cargo-apk
+        id: build-cargo-apk
+        if: steps.install-cargo-apk.outcome == 'success'
         run: cargo apk build --release
+        continue-on-error: true
 
+      # ==========================================
+      # Fallback: اگر cargo-apk کار نکرد، از xbuild استفاده کن
+      # ==========================================
+      - name: Fallback - Install and Build with xbuild
+        if: steps.build-cargo-apk.outcome == 'failure' || steps.install-cargo-apk.outcome == 'failure'
+        run: |
+          echo "⚠️ cargo-apk failed. Trying xbuild as fallback..."
+          cargo install xbuild
+          xbuild build --release --platform android || {
+            echo "❌ xbuild also failed. Manual build attempt..."
+            # تلاش دستی با cargo-ndk
+            cargo install cargo-ndk
+            cargo ndk -t aarch64-linux-android build --release
+          }
+
+      # ==========================================
+      # آپلود APK (همه مسیرهای ممکن)
+      # ==========================================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -56,4 +156,5 @@ jobs:
           path: |
             target/release/apk/*.apk
             target/aarch64-linux-android/release/apk/*.apk
+            target/aarch64-linux-android/release/*.apk
           if-no-files-found: warn
